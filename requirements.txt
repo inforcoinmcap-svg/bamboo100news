@@ -1,0 +1,5 @@
+python-telegram-bot[job-queue]==21.3
+httpx
+beautifulsoup4
+anthropic
+pytz
