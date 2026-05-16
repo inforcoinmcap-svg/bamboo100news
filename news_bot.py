@@ -1,6 +1,5 @@
 import logging
 import os
-import json
 import asyncio
 import httpx
 from datetime import datetime, time
@@ -18,31 +17,20 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
-# Lưu các tin đã đăng để tránh đăng lại
+# Tránh đăng lại
 posted_events = set()
+posted_news = set()
 
-# Currencies và impact level cần theo dõi
 WATCH_LIST = {
     "USD": ["high"],
     "CNY": ["high", "medium"],
 }
 
 CURRENCY_FLAGS = {
-    "USD": "🇺🇸",
-    "CNY": "🇨🇳",
-    "EUR": "🇪🇺",
-    "GBP": "🇬🇧",
-    "JPY": "🇯🇵",
-    "AUD": "🇦🇺",
-}
-
-IMPACT_ICONS = {
-    "high": "🔴",
-    "medium": "🟡",
-    "low": "⚪",
+    "USD": "🇺🇸", "CNY": "🇨🇳", "EUR": "🇪🇺",
+    "GBP": "🇬🇧", "JPY": "🇯🇵", "AUD": "🇦🇺",
 }
 
 
@@ -50,8 +38,18 @@ def get_vn_time():
     return datetime.now(VN_TZ)
 
 
+def call_gemini(prompt):
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    response = model.generate_content(prompt)
+    return response.text.strip()
+
+
+# ═══════════════════════════════════════════
+# PHẦN 1: FOREXFACTORY
+# ═══════════════════════════════════════════
+
 async def fetch_forexfactory():
-    """Scrape lịch kinh tế ForexFactory hôm nay"""
     url = "https://www.forexfactory.com/calendar"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -64,21 +62,17 @@ async def fetch_forexfactory():
             response.raise_for_status()
             return response.text
     except Exception as e:
-        logger.error(f"Error fetching ForexFactory: {e}")
+        logger.error(f"ForexFactory fetch error: {e}")
         return None
 
 
 def parse_calendar(html):
-    """Parse HTML ForexFactory lấy các sự kiện"""
     if not html:
         return []
-
     soup = BeautifulSoup(html, "html.parser")
     events = []
-
     calendar_table = soup.find("table", class_="calendar__table")
     if not calendar_table:
-        logger.warning("Calendar table not found")
         return []
 
     rows = calendar_table.find_all("tr", class_="calendar__row")
@@ -86,53 +80,42 @@ def parse_calendar(html):
 
     for row in rows:
         try:
-            # Lấy ngày nếu có
             date_cell = row.find("td", class_="calendar__date")
             if date_cell and date_cell.text.strip():
                 current_date = date_cell.text.strip()
 
-            # Lấy giờ
             time_cell = row.find("td", class_="calendar__time")
             if not time_cell:
                 continue
             event_time = time_cell.text.strip()
 
-            # Lấy currency
             currency_cell = row.find("td", class_="calendar__currency")
             if not currency_cell:
                 continue
             currency = currency_cell.text.strip()
-
-            # Chỉ lấy USD và CNY
             if currency not in WATCH_LIST:
                 continue
 
-            # Lấy impact
             impact_cell = row.find("td", class_="calendar__impact")
             if not impact_cell:
                 continue
             impact_span = impact_cell.find("span")
             if not impact_span:
                 continue
-
             impact_class = impact_span.get("class", [])
             impact = "low"
             if any("high" in c for c in impact_class):
                 impact = "high"
             elif any("medium" in c for c in impact_class):
                 impact = "medium"
-
-            # Kiểm tra watch list
             if impact not in WATCH_LIST.get(currency, []):
                 continue
 
-            # Lấy tên sự kiện
             event_cell = row.find("td", class_="calendar__event")
             if not event_cell:
                 continue
             event_name = event_cell.text.strip()
 
-            # Lấy actual, forecast, previous
             actual_cell = row.find("td", class_="calendar__actual")
             forecast_cell = row.find("td", class_="calendar__forecast")
             previous_cell = row.find("td", class_="calendar__previous")
@@ -141,9 +124,7 @@ def parse_calendar(html):
             forecast = forecast_cell.text.strip() if forecast_cell else ""
             previous = previous_cell.text.strip() if previous_cell else ""
 
-            # Tạo event ID duy nhất
             event_id = f"{current_date}_{event_time}_{currency}_{event_name}"
-
             events.append({
                 "id": event_id,
                 "date": current_date,
@@ -155,74 +136,45 @@ def parse_calendar(html):
                 "forecast": forecast,
                 "previous": previous,
             })
-
         except Exception as e:
-            logger.error(f"Error parsing row: {e}")
+            logger.error(f"Parse row error: {e}")
             continue
-
     return events
 
 
-async def analyze_with_claude(event):
-    """Gọi Gemini AI để viết phân tích tin"""
+async def analyze_forex_event(event):
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-1.5-flash")
-
         flag = CURRENCY_FLAGS.get(event["currency"], "")
         actual = event["actual"]
         forecast = event["forecast"]
         previous = event["previous"]
 
-        # So sánh actual vs forecast
-        comparison = ""
         try:
             act_val = float(actual.replace("%", "").replace("K", "000").replace("M", "000000"))
             fct_val = float(forecast.replace("%", "").replace("K", "000").replace("M", "000000"))
-            if act_val > fct_val:
-                comparison = "cao hơn dự báo"
-            elif act_val < fct_val:
-                comparison = "thấp hơn dự báo"
-            else:
-                comparison = "đúng dự báo"
+            comparison = "cao hơn dự báo" if act_val > fct_val else ("thấp hơn dự báo" if act_val < fct_val else "đúng dự báo")
         except:
             comparison = "so với dự báo"
 
-        prompt = f"""Bạn là chuyên gia phân tích thị trường tài chính và hàng hoá phái sinh.
+        prompt = f"""Bạn là chuyên gia phân tích thị trường hàng hoá phái sinh.
 
-Vừa có tin kinh tế quan trọng được công bố:
-- Tên tin: {event['name']}
-- Đồng tiền: {event['currency']} {flag}
+Tin kinh tế vừa công bố:
+- Tên: {event['name']} ({event['currency']} {flag})
 - Actual: {actual} ({comparison})
-- Forecast: {forecast}
-- Previous: {previous}
+- Dự báo: {forecast} | Trước đó: {previous}
 
-Hãy viết 2-3 câu phân tích ngắn gọn về:
-1. Ý nghĩa của số liệu này so với kỳ vọng
-2. Tác động ngắn hạn đến thị trường hàng hoá (nông sản, kim loại, năng lượng)
+Viết 1-2 câu phân tích tác động ngắn hạn đến thị trường hàng hoá.
+Yêu cầu: tiếng Việt, súc tích, đề cập mã hàng hoá cụ thể nếu có liên quan, không dùng template cứng."""
 
-Yêu cầu:
-- Viết bằng tiếng Việt
-- Tự nhiên, đa dạng văn phong, không dùng template cứng
-- Ngắn gọn, súc tích, đi thẳng vào tác động
-- Không bắt đầu bằng "Phân tích:" hay "Nhận xét:"
-- Chỉ trả về đoạn phân tích, không có gì thêm"""
-
-        response = await asyncio.to_thread(model.generate_content, prompt)
-        return response.text.strip()
-
+        analysis = await asyncio.to_thread(call_gemini, prompt)
+        return analysis
     except Exception as e:
-        logger.error(f"Gemini API error: {e}")
+        logger.error(f"Gemini forex error: {e}")
         return None
 
 
-def format_news_message(event, analysis):
-    """Format tin nhắn đăng lên Telegram"""
+def format_forex_message(event, analysis):
     flag = CURRENCY_FLAGS.get(event["currency"], "")
-    impact_icon = IMPACT_ICONS.get(event["impact"], "⚪")
-    now = get_vn_time()
-
-    # So sánh actual vs forecast để highlight
     actual = event["actual"]
     forecast = event["forecast"]
     previous = event["previous"]
@@ -230,15 +182,8 @@ def format_news_message(event, analysis):
     try:
         act_val = float(actual.replace("%", "").replace("K", "000").replace("M", "000000").replace(",", ""))
         fct_val = float(forecast.replace("%", "").replace("K", "000").replace("M", "000000").replace(",", ""))
-        if act_val > fct_val:
-            result_icon = "📈"
-            result_text = "Cao hơn dự báo"
-        elif act_val < fct_val:
-            result_icon = "📉"
-            result_text = "Thấp hơn dự báo"
-        else:
-            result_icon = "➡️"
-            result_text = "Đúng dự báo"
+        result_icon = "📈" if act_val > fct_val else ("📉" if act_val < fct_val else "➡️")
+        result_text = "Cao hơn dự báo" if act_val > fct_val else ("Thấp hơn dự báo" if act_val < fct_val else "Đúng dự báo")
     except:
         result_icon = "📊"
         result_text = ""
@@ -251,79 +196,382 @@ def format_news_message(event, analysis):
         f"📋 Trước đó: {previous}",
         f"",
     ]
-
     if analysis:
         lines.append(f"👉 {analysis}")
-        lines.append(f"")
-
-    lines.append(f"🕐 {now.strftime('%H:%M GMT+7 | %d/%m/%Y')}")
-
     return "\n".join(lines)
 
 
-async def check_and_post_news(context=None):
-    """Kiểm tra và đăng tin mới"""
-    logger.info("Checking ForexFactory for new events...")
-
+async def check_forex_news(context=None):
+    logger.info("Checking ForexFactory...")
     html = await fetch_forexfactory()
     if not html:
         return
-
     events = parse_calendar(html)
-    logger.info(f"Found {len(events)} relevant events")
-
     bot = Bot(token=BOT_TOKEN)
-
     for event in events:
-        # Chỉ đăng tin đã có actual (tin đã ra)
         if not event["actual"]:
             continue
-
-        # Tránh đăng lại
         if event["id"] in posted_events:
             continue
-
-        logger.info(f"New event: {event['name']} | {event['currency']} | Actual: {event['actual']}")
-
-        # Gọi Claude phân tích
-        analysis = await analyze_with_claude(event)
-
-        # Format tin nhắn
-        message = format_news_message(event, analysis)
-
-        # Đăng lên channel
+        analysis = await analyze_forex_event(event)
+        message = format_forex_message(event, analysis)
         try:
-            await bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=message,
-                parse_mode=None
-            )
+            await bot.send_message(chat_id=CHANNEL_ID, text=message, parse_mode=None)
             posted_events.add(event["id"])
-            logger.info(f"Posted: {event['name']}")
-            await asyncio.sleep(2)  # Tránh spam
+            logger.info(f"Posted forex: {event['name']}")
+            await asyncio.sleep(2)
         except Exception as e:
-            logger.error(f"Error posting to channel: {e}")
+            logger.error(f"Telegram error: {e}")
 
+
+# ═══════════════════════════════════════════
+# PHẦN 2: EIA TỒN KHO DẦU & KHÍ
+# ═══════════════════════════════════════════
+
+eia_posted = set()
+
+async def fetch_eia_petroleum():
+    """Lấy dữ liệu tồn kho dầu từ EIA"""
+    url = "https://www.eia.gov/petroleum/supply/weekly/"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            response = await client.get(url, headers=headers)
+            soup = BeautifulSoup(response.text, "html.parser")
+            # Tìm số liệu tồn kho mới nhất
+            highlights = soup.find_all("div", class_="summary-data")
+            if not highlights:
+                # Thử tìm theo cách khác
+                highlights = soup.find_all("p", class_="summary")
+            return soup.get_text()[:3000] if soup else None
+    except Exception as e:
+        logger.error(f"EIA petroleum error: {e}")
+        return None
+
+
+async def fetch_eia_gas():
+    """Lấy dữ liệu tồn kho khí từ EIA"""
+    url = "https://www.eia.gov/naturalgas/storage/dashboard/"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            response = await client.get(url, headers=headers)
+            soup = BeautifulSoup(response.text, "html.parser")
+            return soup.get_text()[:3000] if soup else None
+    except Exception as e:
+        logger.error(f"EIA gas error: {e}")
+        return None
+
+
+async def analyze_eia(data_text, data_type):
+    """AI phân tích dữ liệu EIA"""
+    try:
+        type_name = "tồn kho dầu thô" if data_type == "oil" else "tồn kho khí tự nhiên"
+        prompt = f"""Bạn là chuyên gia phân tích thị trường năng lượng.
+
+Dữ liệu EIA {type_name} vừa công bố:
+{data_text[:1500]}
+
+Nếu có số liệu tồn kho cụ thể, hãy:
+1. Tóm tắt số liệu chính (actual vs dự báo nếu có)
+2. Viết 1-2 câu phân tích tác động đến giá {type_name}
+
+Nếu không tìm thấy số liệu cụ thể, trả về "NO_DATA".
+Trả lời bằng tiếng Việt, súc tích."""
+
+        result = await asyncio.to_thread(call_gemini, prompt)
+        if "NO_DATA" in result:
+            return None
+        return result
+    except Exception as e:
+        logger.error(f"EIA analyze error: {e}")
+        return None
+
+
+async def check_eia_news(context=None):
+    """Kiểm tra và đăng tin EIA"""
+    now = get_vn_time()
+    bot = Bot(token=BOT_TOKEN)
+
+    # Tồn kho dầu: Thứ 4 (weekday=2), sau 21:30 GMT+7
+    if now.weekday() == 2 and now.hour >= 21:
+        date_key = f"eia_oil_{now.strftime('%Y-%m-%d')}"
+        if date_key not in eia_posted:
+            data = await fetch_eia_petroleum()
+            if data:
+                analysis = await analyze_eia(data, "oil")
+                if analysis:
+                    msg = f"⛽ *Báo cáo tồn kho dầu thô EIA*\n\n{analysis}"
+                    try:
+                        await bot.send_message(chat_id=CHANNEL_ID, text=msg, parse_mode="Markdown")
+                        eia_posted.add(date_key)
+                        logger.info("Posted EIA oil")
+                    except Exception as e:
+                        logger.error(f"EIA oil post error: {e}")
+
+    # Tồn kho khí: Thứ 5 (weekday=3), sau 21:30 GMT+7
+    if now.weekday() == 3 and now.hour >= 21:
+        date_key = f"eia_gas_{now.strftime('%Y-%m-%d')}"
+        if date_key not in eia_posted:
+            data = await fetch_eia_gas()
+            if data:
+                analysis = await analyze_eia(data, "gas")
+                if analysis:
+                    msg = f"🔥 *Báo cáo tồn kho khí tự nhiên EIA*\n\n{analysis}"
+                    try:
+                        await bot.send_message(chat_id=CHANNEL_ID, text=msg, parse_mode="Markdown")
+                        eia_posted.add(date_key)
+                        logger.info("Posted EIA gas")
+                    except Exception as e:
+                        logger.error(f"EIA gas post error: {e}")
+
+
+# ═══════════════════════════════════════════
+# PHẦN 3: USDA DOANH SỐ XUẤT KHẨU
+# ═══════════════════════════════════════════
+
+usda_posted = set()
+
+async def fetch_usda_export_sales():
+    """Lấy báo cáo doanh số xuất khẩu USDA"""
+    url = "https://apps.fas.usda.gov/export-sales/esrd1.html"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            response = await client.get(url, headers=headers)
+            soup = BeautifulSoup(response.text, "html.parser")
+            return soup.get_text()[:3000] if soup else None
+    except Exception as e:
+        logger.error(f"USDA export error: {e}")
+        return None
+
+
+async def analyze_usda(data_text):
+    """AI phân tích dữ liệu USDA"""
+    try:
+        prompt = f"""Bạn là chuyên gia phân tích thị trường nông sản.
+
+B�o cáo doanh số xuất khẩu nông sản USDA tuần này:
+{data_text[:1500]}
+
+Nếu có số liệu cụ thể, hãy:
+1. Tóm tắt các mặt hàng chính (đậu tương, ngô, lúa mỳ)
+2. So sánh với tuần trước nếu có
+3. Viết 1-2 câu phân tích tác động đến giá
+
+Nếu không tìm thấy số liệu cụ thể, trả về "NO_DATA".
+Trả lời bằng tiếng Việt, súc tích, đề cập mã ZSE/ZCE/ZWA nếu liên quan."""
+
+        result = await asyncio.to_thread(call_gemini, prompt)
+        if "NO_DATA" in result:
+            return None
+        return result
+    except Exception as e:
+        logger.error(f"USDA analyze error: {e}")
+        return None
+
+
+async def check_usda_news(context=None):
+    """Kiểm tra và đăng tin USDA Export Sales - Thứ 5"""
+    now = get_vn_time()
+    if now.weekday() != 3:  # Thứ 5
+        return
+    if now.hour < 20:  # Sau 20:00 GMT+7
+        return
+
+    date_key = f"usda_export_{now.strftime('%Y-%m-%d')}"
+    if date_key in usda_posted:
+        return
+
+    data = await fetch_usda_export_sales()
+    if not data:
+        return
+
+    analysis = await analyze_usda(data)
+    if not analysis:
+        return
+
+    bot = Bot(token=BOT_TOKEN)
+    msg = f"🌾 *Báo cáo Doanh số Xuất khẩu Nông sản USDA*\n\n{analysis}"
+    try:
+        await bot.send_message(chat_id=CHANNEL_ID, text=msg, parse_mode="Markdown")
+        usda_posted.add(date_key)
+        logger.info("Posted USDA export sales")
+    except Exception as e:
+        logger.error(f"USDA post error: {e}")
+
+
+# ═══════════════════════════════════════════
+# PHẦN 4: TIN MẨU HÀNG HOÁ (Reuters)
+# ═══════════════════════════════════════════
+
+async def fetch_reuters_commodities():
+    """Lấy tin mẩu hàng hoá từ Reuters"""
+    url = "https://www.reuters.com/markets/commodities/"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            response = await client.get(url, headers=headers)
+            soup = BeautifulSoup(response.text, "html.parser")
+
+            articles = []
+            # Tìm các bài viết
+            for article in soup.find_all(["article", "div"], class_=lambda x: x and "article" in x.lower())[:20]:
+                title_el = article.find(["h3", "h2", "a"])
+                if title_el:
+                    title = title_el.text.strip()
+                    link_el = article.find("a", href=True)
+                    link = link_el["href"] if link_el else ""
+                    if link and not link.startswith("http"):
+                        link = f"https://www.reuters.com{link}"
+                    if title and len(title) > 20:
+                        articles.append({"title": title, "link": link})
+
+            return articles[:15]
+    except Exception as e:
+        logger.error(f"Reuters fetch error: {e}")
+        return []
+
+
+async def filter_and_analyze_news(articles):
+    """AI lọc và phân tích tin quan trọng"""
+    if not articles:
+        return []
+
+    titles_text = "\n".join([f"{i+1}. {a['title']}" for i, a in enumerate(articles)])
+
+    try:
+        prompt = f"""Bạn là chuyên gia phân tích thị trường hàng hoá phái sinh Việt Nam.
+
+Danh sách tin tức hàng hoá từ Reuters:
+{titles_text}
+
+Nhiệm vụ:
+1. Chọn TỐI ĐA 2 tin quan trọng nhất (điểm ≥ 7/10) có tác động đáng kể đến giá hàng hoá
+2. Tiêu chí: thiên tai/thời tiết, địa chính trị, thay đổi cung cầu lớn, chính sách xuất nhập khẩu đột biến
+3. Bỏ qua tin phân tích thị trường thông thường, tin kỹ thuật, tin không rõ tác động
+
+Với mỗi tin được chọn, trả về theo format CHÍNH XÁC:
+ARTICLE:[số thứ tự]
+TITLE_VI:[tiêu đề dịch sang tiếng Việt, ngắn gọn]
+ANALYSIS:[1-2 câu phân tích tác động đến hàng hoá, đề cập mã cụ thể nếu có]
+EMOJI:[1 emoji phù hợp với nội dung tin]
+---
+
+Nếu không có tin nào đủ quan trọng, trả về: NONE"""
+
+        result = await asyncio.to_thread(call_gemini, prompt)
+
+        if "NONE" in result:
+            return []
+
+        # Parse kết quả
+        selected = []
+        blocks = result.split("---")
+        for block in blocks:
+            if "ARTICLE:" not in block:
+                continue
+            try:
+                lines = block.strip().split("\n")
+                data = {}
+                for line in lines:
+                    if line.startswith("ARTICLE:"):
+                        idx = int(line.replace("ARTICLE:", "").strip()) - 1
+                        if 0 <= idx < len(articles):
+                            data["article"] = articles[idx]
+                    elif line.startswith("TITLE_VI:"):
+                        data["title_vi"] = line.replace("TITLE_VI:", "").strip()
+                    elif line.startswith("ANALYSIS:"):
+                        data["analysis"] = line.replace("ANALYSIS:", "").strip()
+                    elif line.startswith("EMOJI:"):
+                        data["emoji"] = line.replace("EMOJI:", "").strip()
+
+                if "title_vi" in data and "analysis" in data:
+                    selected.append(data)
+            except Exception as e:
+                logger.error(f"Parse news block error: {e}")
+                continue
+
+        return selected
+
+    except Exception as e:
+        logger.error(f"Filter news error: {e}")
+        return []
+
+
+def format_commodity_news(news_data):
+    """Format tin mẩu hàng hoá"""
+    emoji = news_data.get("emoji", "📰")
+    title = news_data.get("title_vi", "")
+    analysis = news_data.get("analysis", "")
+
+    lines = [
+        f"{emoji} *{title}*",
+        f"",
+        f"👉 {analysis}",
+    ]
+    return "\n".join(lines)
+
+
+async def check_commodity_news(context=None):
+    """Kiểm tra và đăng tin mẩu hàng hoá"""
+    logger.info("Checking commodity news...")
+    articles = await fetch_reuters_commodities()
+    if not articles:
+        return
+
+    # Lọc bài chưa đăng
+    new_articles = [a for a in articles if a["title"] not in posted_news]
+    if not new_articles:
+        return
+
+    selected = await filter_and_analyze_news(new_articles)
+    if not selected:
+        return
+
+    bot = Bot(token=BOT_TOKEN)
+    for news in selected:
+        article = news.get("article", {})
+        title = article.get("title", "")
+        if title in posted_news:
+            continue
+
+        message = format_commodity_news(news)
+        try:
+            await bot.send_message(chat_id=CHANNEL_ID, text=message, parse_mode="Markdown")
+            posted_news.add(title)
+            logger.info(f"Posted commodity news: {news.get('title_vi', '')}")
+            await asyncio.sleep(3)
+        except Exception as e:
+            logger.error(f"Commodity news post error: {e}")
+
+
+# ═══════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════
 
 async def main():
-    """Chạy bot"""
     logger.info("🚀 News Bot đang chạy...")
-
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Check tin mỗi 2 phút
-    app.job_queue.run_repeating(
-        check_and_post_news,
-        interval=120,
-        first=10,
-    )
+    # ForexFactory: check mỗi 2 phút
+    app.job_queue.run_repeating(check_forex_news, interval=120, first=10)
+
+    # EIA + USDA: check mỗi 30 phút
+    app.job_queue.run_repeating(check_eia_news, interval=1800, first=60)
+    app.job_queue.run_repeating(check_usda_news, interval=1800, first=90)
+
+    # Tin mẩu Reuters: check mỗi 15 phút
+    app.job_queue.run_repeating(check_commodity_news, interval=900, first=30)
 
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
 
-    logger.info("Bot started, checking news every 2 minutes...")
-
+    logger.info("✅ Bot started!")
     try:
         await asyncio.Event().wait()
     except (KeyboardInterrupt, SystemExit):
