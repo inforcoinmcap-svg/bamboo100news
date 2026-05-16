@@ -37,11 +37,22 @@ def get_vn_time():
     return datetime.now(VN_TZ)
 
 
-def call_gemini(prompt):
+def call_gemini(prompt, retries=3):
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel("gemini-2.0-flash")
-    response = model.generate_content(prompt)
-    return response.text.strip()
+    for attempt in range(retries):
+        try:
+            response = model.generate_content(prompt)
+            return response.text.strip()
+        except Exception as e:
+            if "429" in str(e) or "quota" in str(e).lower():
+                wait = (attempt + 1) * 30  # 30s, 60s, 90s
+                logger.warning(f"Gemini rate limit, waiting {wait}s...")
+                import time
+                time.sleep(wait)
+            else:
+                raise e
+    return None
 
 
 # ═══════════════════════════════════════════
@@ -599,22 +610,37 @@ async def check_commodity_news(context=None):
 
 async def main():
     logger.info("News Bot dang chay...")
+    
+    # Các counter để track lần check
+    commodity_counter = 0
 
     while True:
         try:
-            logger.info("Checking all news sources...")
+            logger.info("--- Checking news sources ---")
+            
+            # ForexFactory: check mỗi vòng (10 phút)
             await check_forex_news()
-            await asyncio.sleep(5)
+            await asyncio.sleep(10)
+
+            # EIA + USDA: check mỗi vòng (có tự lọc ngày/giờ bên trong)
             await check_eia_news()
-            await asyncio.sleep(5)
+            await asyncio.sleep(10)
             await check_usda_news()
-            await asyncio.sleep(5)
-            await check_commodity_news()
-            logger.info("Done, sleeping 2 minutes...")
-            await asyncio.sleep(120)
+            await asyncio.sleep(10)
+
+            # Tin mẩu Reuters: check mỗi 3 vòng (30 phút) để tiết kiệm quota
+            commodity_counter += 1
+            if commodity_counter >= 3:
+                await check_commodity_news()
+                commodity_counter = 0
+                await asyncio.sleep(10)
+
+            logger.info("--- Done, sleeping 10 minutes ---")
+            await asyncio.sleep(600)  # 10 phút
+            
         except Exception as e:
             logger.error(f"Main loop error: {e}")
-            await asyncio.sleep(60)
+            await asyncio.sleep(120)
 
 
 if __name__ == "__main__":
