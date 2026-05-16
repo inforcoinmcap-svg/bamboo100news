@@ -6,7 +6,6 @@ from datetime import datetime, time
 from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
 from telegram import Bot
-from telegram.ext import Application
 import google.generativeai as genai
 
 # ============================================================
@@ -554,32 +553,23 @@ async def check_commodity_news(context=None):
 # ═══════════════════════════════════════════
 
 async def main():
-    logger.info("🚀 News Bot đang chạy...")
-    app = Application.builder().token(BOT_TOKEN).build()
+    logger.info("News Bot dang chay...")
 
-    # ForexFactory: check mỗi 2 phút
-    app.job_queue.run_repeating(check_forex_news, interval=120, first=10)
-
-    # EIA + USDA: check mỗi 30 phút
-    app.job_queue.run_repeating(check_eia_news, interval=1800, first=60)
-    app.job_queue.run_repeating(check_usda_news, interval=1800, first=90)
-
-    # Tin mẩu Reuters: check mỗi 15 phút
-    app.job_queue.run_repeating(check_commodity_news, interval=900, first=30)
-
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-
-    logger.info("✅ Bot started!")
-    try:
-        await asyncio.Event().wait()
-    except (KeyboardInterrupt, SystemExit):
-        pass
-    finally:
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
+    while True:
+        try:
+            logger.info("Checking all news sources...")
+            await check_forex_news()
+            await asyncio.sleep(5)
+            await check_eia_news()
+            await asyncio.sleep(5)
+            await check_usda_news()
+            await asyncio.sleep(5)
+            await check_commodity_news()
+            logger.info("Done, sleeping 2 minutes...")
+            await asyncio.sleep(120)
+        except Exception as e:
+            logger.error(f"Main loop error: {e}")
+            await asyncio.sleep(60)
 
 
 if __name__ == "__main__":
