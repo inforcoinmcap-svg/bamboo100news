@@ -404,35 +404,80 @@ async def check_usda_news(context=None):
 # PHẦN 4: TIN MẨU HÀNG HOÁ (Reuters)
 # ═══════════════════════════════════════════
 
-async def fetch_reuters_commodities():
-    """Lấy tin mẩu hàng hoá từ Reuters"""
-    url = "https://www.reuters.com/markets/commodities/"
+async def fetch_from_source(url, base_url=""):
+    """Fetch articles từ một nguồn tin"""
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "text/html,application/xhtml+xml",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Referer": "https://www.google.com/",
     }
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             response = await client.get(url, headers=headers)
+            if response.status_code != 200:
+                logger.warning(f"Failed {url}: {response.status_code}")
+                return []
             soup = BeautifulSoup(response.text, "html.parser")
-
             articles = []
-            # Tìm các bài viết
-            for article in soup.find_all(["article", "div"], class_=lambda x: x and "article" in x.lower())[:20]:
-                title_el = article.find(["h3", "h2", "a"])
-                if title_el:
-                    title = title_el.text.strip()
-                    link_el = article.find("a", href=True)
-                    link = link_el["href"] if link_el else ""
+            for el in soup.find_all(["h2", "h3", "h4"])[:30]:
+                title = el.text.strip()
+                link_el = el.find("a", href=True) or el.find_parent("a", href=True)
+                link = ""
+                if link_el:
+                    link = link_el.get("href", "")
                     if link and not link.startswith("http"):
-                        link = f"https://www.reuters.com{link}"
-                    if title and len(title) > 20:
-                        articles.append({"title": title, "link": link})
-
+                        link = f"{base_url}{link}"
+                if title and len(title) > 25 and len(title) < 200:
+                    articles.append({"title": title, "link": link})
             return articles[:15]
     except Exception as e:
-        logger.error(f"Reuters fetch error: {e}")
+        logger.error(f"Fetch error {url}: {e}")
         return []
+
+
+async def fetch_commodity_news_sources():
+    """Lấy tin từ nhiều nguồn hàng hoá"""
+    all_articles = []
+
+    # Nguồn 1: Nasdaq Commodities
+    articles1 = await fetch_from_source(
+        "https://www.nasdaq.com/market-activity/commodities",
+        "https://www.nasdaq.com"
+    )
+    all_articles.extend(articles1)
+    await asyncio.sleep(1)
+
+    # Nguồn 2: MarketWatch Commodities
+    articles2 = await fetch_from_source(
+        "https://www.marketwatch.com/investing/commodities",
+        "https://www.marketwatch.com"
+    )
+    all_articles.extend(articles2)
+    await asyncio.sleep(1)
+
+    # Nguồn 3: Investing.com Commodities News
+    articles3 = await fetch_from_source(
+        "https://www.investing.com/commodities/",
+        "https://www.investing.com"
+    )
+    all_articles.extend(articles3)
+
+    # Dedup theo title
+    seen = set()
+    unique = []
+    for a in all_articles:
+        if a["title"] not in seen and a["title"] not in posted_news:
+            seen.add(a["title"])
+            unique.append(a)
+
+    logger.info(f"Found {len(unique)} unique commodity articles")
+    return unique[:20]
+
+
+async def fetch_reuters_commodities():
+    """Wrapper để tương thích với code cũ"""
+    return await fetch_commodity_news_sources()
 
 
 async def filter_and_analyze_news(articles):
