@@ -8,12 +8,12 @@ from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.ext import Application
-import anthropic
+import google.generativeai as genai
 
 # ============================================================
 BOT_TOKEN = os.environ.get("NEWS_BOT_TOKEN", "")
 CHANNEL_ID = int(os.environ.get("NEWS_CHANNEL_ID", "0"))
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 # ============================================================
 
 logging.basicConfig(level=logging.INFO)
@@ -164,9 +164,10 @@ def parse_calendar(html):
 
 
 async def analyze_with_claude(event):
-    """Gọi Claude AI để viết phân tích tin"""
+    """Gọi Gemini AI để viết phân tích tin"""
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel("gemini-1.5-flash")
 
         flag = CURRENCY_FLAGS.get(event["currency"], "")
         actual = event["actual"]
@@ -207,16 +208,11 @@ Yêu cầu:
 - Không bắt đầu bằng "Phân tích:" hay "Nhận xét:"
 - Chỉ trả về đoạn phân tích, không có gì thêm"""
 
-        message = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=300,
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        return message.content[0].text.strip()
+        response = await asyncio.to_thread(model.generate_content, prompt)
+        return response.text.strip()
 
     except Exception as e:
-        logger.error(f"Claude API error: {e}")
+        logger.error(f"Gemini API error: {e}")
         return None
 
 
