@@ -224,6 +224,8 @@ async def check_forex_news(context=None):
         if event["id"] in posted_events:
             continue
         analysis = await analyze_forex_event(event)
+        if analysis is None:
+            analysis = "Số liệu vừa được công bố, thị trường đang phản ứng."
         message = format_forex_message(event, analysis)
         try:
             await bot.send_message(chat_id=CHANNEL_ID, text=message, parse_mode=None)
@@ -492,47 +494,49 @@ async def fetch_reuters_commodities():
 
 
 async def filter_and_analyze_news(articles):
-    """AI lọc và phân tích tin quan trọng"""
+    """AI loc va phan tich tin quan trong - 1 API call duy nhat"""
     if not articles:
         return []
 
+    articles = articles[:15]
     titles_text = "\n".join([f"{i+1}. {a['title']}" for i, a in enumerate(articles)])
 
     try:
-        prompt = f"""Bạn là chuyên gia phân tích thị trường hàng hoá phái sinh Việt Nam.
+        prompt = f"""Ban la chuyen gia phan tich thi truong hang hoa phai sinh Viet Nam.
 
-Danh sách tin tức hàng hoá từ Reuters:
+Danh sach {len(articles)} tin tuc hang hoa:
 {titles_text}
 
-Nhiệm vụ:
-1. Chọn TỐI ĐA 2 tin quan trọng nhất (điểm ≥ 7/10) có tác động đáng kể đến giá hàng hoá
-2. Tiêu chí: thiên tai/thời tiết, địa chính trị, thay đổi cung cầu lớn, chính sách xuất nhập khẩu đột biến
-3. Bỏ qua tin phân tích thị trường thông thường, tin kỹ thuật, tin không rõ tác động
+Chon TOI DA 2 tin THUC SU quan trong voi hang hoa (thien tai, dia chinh tri, cung cau dot bien, chinh sach XNK lon).
+Bo qua tin phan tich thong thuong, du bao gia, tin ky thuat.
 
-Với mỗi tin được chọn, trả về theo format CHÍNH XÁC:
-ARTICLE:[số thứ tự]
-TITLE_VI:[tiêu đề dịch sang tiếng Việt, ngắn gọn]
-ANALYSIS:[1-2 câu phân tích tác động đến hàng hoá, đề cập mã cụ thể nếu có]
-EMOJI:[1 emoji phù hợp với nội dung tin]
+Format tra ve CHINH XAC:
+ARTICLE:[so]
+TITLE_VI:[tieu de tieng Viet ngan gon]
+ANALYSIS:[1-2 cau tac dong den hang hoa, co ma neu lien quan]
+EMOJI:[1 emoji]
 ---
 
-Nếu không có tin nào đủ quan trọng, trả về: NONE"""
+Neu khong co tin quan trong: NONE"""
 
         result = await asyncio.to_thread(call_gemini, prompt)
 
-        if "NONE" in result:
+        if not result:
+            logger.warning("Gemini returned None, skipping")
             return []
 
-        # Parse kết quả
+        if "NONE" in result:
+            logger.info("No important commodity news")
+            return []
+
         selected = []
         blocks = result.split("---")
         for block in blocks:
             if "ARTICLE:" not in block:
                 continue
             try:
-                lines = block.strip().split("\n")
                 data = {}
-                for line in lines:
+                for line in block.strip().split("\n"):
                     if line.startswith("ARTICLE:"):
                         idx = int(line.replace("ARTICLE:", "").strip()) - 1
                         if 0 <= idx < len(articles):
@@ -543,32 +547,18 @@ Nếu không có tin nào đủ quan trọng, trả về: NONE"""
                         data["analysis"] = line.replace("ANALYSIS:", "").strip()
                     elif line.startswith("EMOJI:"):
                         data["emoji"] = line.replace("EMOJI:", "").strip()
-
                 if "title_vi" in data and "analysis" in data:
                     selected.append(data)
             except Exception as e:
-                logger.error(f"Parse news block error: {e}")
+                logger.error(f"Parse error: {e}")
                 continue
 
+        logger.info(f"Selected {len(selected)} articles")
         return selected
 
     except Exception as e:
         logger.error(f"Filter news error: {e}")
         return []
-
-
-def format_commodity_news(news_data):
-    """Format tin mẩu hàng hoá"""
-    emoji = news_data.get("emoji", "📰")
-    title = news_data.get("title_vi", "")
-    analysis = news_data.get("analysis", "")
-
-    lines = [
-        f"{emoji} *{title}*",
-        f"",
-        f"👉 {analysis}",
-    ]
-    return "\n".join(lines)
 
 
 async def check_commodity_news(context=None):
@@ -643,5 +633,52 @@ async def main():
             await asyncio.sleep(120)
 
 
+async def test_bot():
+    """Test toàn bộ luồng bot"""
+    import google.generativeai as genai
+    from telegram import Bot
+
+    logger.info("=== RUNNING TEST ===")
+    bot = Bot(token=BOT_TOKEN)
+
+    # Test 1: Gemini AI
+    logger.info("Test 1: Gemini AI...")
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        response = model.generate_content("Viết 1 câu ngắn về giá đậu tương bằng tiếng Việt.")
+        analysis = response.text.strip()
+        logger.info(f"Gemini OK: {analysis[:50]}...")
+    except Exception as e:
+        logger.error(f"Gemini FAILED: {e}")
+        return
+
+    # Test 2: Gửi tin test lên channel
+    logger.info("Test 2: Sending test message to channel...")
+    test_msg = (
+        "⚡️ BREAKING NEWS | Core CPI m/m 🇺🇸\n"
+        "\n"
+        "📌 Actual: 0.4%  📈 Cao hơn dự báo\n"
+        "📊 Dự báo: 0.3%\n"
+        "📋 Trước đó: 0.2%\n"
+        "\n"
+        f"👉 {analysis}\n"
+        "\n"
+        "🤖 [TIN TEST - Xác nhận bot hoạt động]"
+    )
+    try:
+        await bot.send_message(chat_id=CHANNEL_ID, text=test_msg)
+        logger.info("✅ Test message sent successfully!")
+    except Exception as e:
+        logger.error(f"Telegram FAILED: {e}")
+        return
+
+    logger.info("=== TEST PASSED ✅ ===")
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "test":
+        asyncio.run(test_bot())
+    else:
+        asyncio.run(main())
