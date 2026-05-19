@@ -6,12 +6,12 @@ from datetime import datetime, time
 from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
 from telegram import Bot
-import google.generativeai as genai
+from groq import Groq
 
 # ============================================================
 BOT_TOKEN = os.environ.get("NEWS_BOT_TOKEN", "")
 CHANNEL_ID = int(os.environ.get("NEWS_CHANNEL_ID", "0"))
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")  # dùng lại biến này cho Groq key
 # ============================================================
 
 logging.basicConfig(level=logging.INFO)
@@ -38,19 +38,23 @@ def get_vn_time():
 
 
 def call_gemini(prompt, retries=3):
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-2.0-flash")
+    client = Groq(api_key=GEMINI_API_KEY)
     for attempt in range(retries):
         try:
-            response = model.generate_content(prompt)
-            return response.text.strip()
+            response = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1000
+            )
+            return response.choices[0].message.content.strip()
         except Exception as e:
-            if "429" in str(e) or "quota" in str(e).lower():
-                wait = (attempt + 1) * 30  # 30s, 60s, 90s
-                logger.warning(f"Gemini rate limit, waiting {wait}s...")
+            if "429" in str(e):
+                wait = (attempt + 1) * 10
+                logger.warning(f"Groq rate limit, waiting {wait}s...")
                 import time
                 time.sleep(wait)
             else:
+                logger.error(f"Groq error: {e}")
                 raise e
     return None
 
@@ -179,7 +183,7 @@ Yêu cầu: tiếng Việt, súc tích, đề cập mã hàng hoá cụ thể n�
         analysis = await asyncio.to_thread(call_gemini, prompt)
         return analysis
     except Exception as e:
-        logger.error(f"Gemini forex error: {e}")
+        logger.error(f"Groq forex error: {e}")
         return None
 
 
@@ -243,18 +247,12 @@ async def check_forex_news(context=None):
 eia_posted = set()
 
 async def fetch_eia_petroleum():
-    """Lấy dữ liệu tồn kho dầu từ EIA"""
     url = "https://www.eia.gov/petroleum/supply/weekly/"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             response = await client.get(url, headers=headers)
             soup = BeautifulSoup(response.text, "html.parser")
-            # Tìm số liệu tồn kho mới nhất
-            highlights = soup.find_all("div", class_="summary-data")
-            if not highlights:
-                # Thử tìm theo cách khác
-                highlights = soup.find_all("p", class_="summary")
             return soup.get_text()[:3000] if soup else None
     except Exception as e:
         logger.error(f"EIA petroleum error: {e}")
@@ -262,7 +260,6 @@ async def fetch_eia_petroleum():
 
 
 async def fetch_eia_gas():
-    """Lấy dữ liệu tồn kho khí từ EIA"""
     url = "https://www.eia.gov/naturalgas/storage/dashboard/"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
@@ -276,7 +273,6 @@ async def fetch_eia_gas():
 
 
 async def analyze_eia(data_text, data_type):
-    """AI phân tích dữ liệu EIA"""
     try:
         type_name = "tồn kho dầu thô" if data_type == "oil" else "tồn kho khí tự nhiên"
         prompt = f"""Bạn là chuyên gia phân tích thị trường năng lượng.
@@ -292,7 +288,7 @@ Nếu không tìm thấy số liệu cụ thể, trả về "NO_DATA".
 Trả lời bằng tiếng Việt, súc tích."""
 
         result = await asyncio.to_thread(call_gemini, prompt)
-        if "NO_DATA" in result:
+        if not result or "NO_DATA" in result:
             return None
         return result
     except Exception as e:
@@ -301,11 +297,9 @@ Trả lời bằng tiếng Việt, súc tích."""
 
 
 async def check_eia_news(context=None):
-    """Kiểm tra và đăng tin EIA"""
     now = get_vn_time()
     bot = Bot(token=BOT_TOKEN)
 
-    # Tồn kho dầu: Thứ 4 (weekday=2), sau 21:30 GMT+7
     if now.weekday() == 2 and now.hour >= 21:
         date_key = f"eia_oil_{now.strftime('%Y-%m-%d')}"
         if date_key not in eia_posted:
@@ -321,7 +315,6 @@ async def check_eia_news(context=None):
                     except Exception as e:
                         logger.error(f"EIA oil post error: {e}")
 
-    # Tồn kho khí: Thứ 5 (weekday=3), sau 21:30 GMT+7
     if now.weekday() == 3 and now.hour >= 21:
         date_key = f"eia_gas_{now.strftime('%Y-%m-%d')}"
         if date_key not in eia_posted:
@@ -345,7 +338,6 @@ async def check_eia_news(context=None):
 usda_posted = set()
 
 async def fetch_usda_export_sales():
-    """Lấy báo cáo doanh số xuất khẩu USDA"""
     url = "https://apps.fas.usda.gov/export-sales/esrd1.html"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
@@ -359,11 +351,10 @@ async def fetch_usda_export_sales():
 
 
 async def analyze_usda(data_text):
-    """AI phân tích dữ liệu USDA"""
     try:
         prompt = f"""Bạn là chuyên gia phân tích thị trường nông sản.
 
-B�o cáo doanh số xuất khẩu nông sản USDA tuần này:
+Báo cáo doanh số xuất khẩu nông sản USDA tuần này:
 {data_text[:1500]}
 
 Nếu có số liệu cụ thể, hãy:
@@ -375,7 +366,7 @@ Nếu không tìm thấy số liệu cụ thể, trả về "NO_DATA".
 Trả lời bằng tiếng Việt, súc tích, đề cập mã ZSE/ZCE/ZWA nếu liên quan."""
 
         result = await asyncio.to_thread(call_gemini, prompt)
-        if "NO_DATA" in result:
+        if not result or "NO_DATA" in result:
             return None
         return result
     except Exception as e:
@@ -384,11 +375,10 @@ Trả lời bằng tiếng Việt, súc tích, đề cập mã ZSE/ZCE/ZWA nếu
 
 
 async def check_usda_news(context=None):
-    """Kiểm tra và đăng tin USDA Export Sales - Thứ 5"""
     now = get_vn_time()
-    if now.weekday() != 3:  # Thứ 5
+    if now.weekday() != 3:
         return
-    if now.hour < 20:  # Sau 20:00 GMT+7
+    if now.hour < 20:
         return
 
     date_key = f"usda_export_{now.strftime('%Y-%m-%d')}"
@@ -414,11 +404,10 @@ async def check_usda_news(context=None):
 
 
 # ═══════════════════════════════════════════
-# PHẦN 4: TIN MẨU HÀNG HOÁ (Reuters)
+# PHẦN 4: TIN MẨU HÀNG HOÁ
 # ═══════════════════════════════════════════
 
 async def fetch_from_source(url, base_url=""):
-    """Fetch articles từ một nguồn tin"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -450,10 +439,8 @@ async def fetch_from_source(url, base_url=""):
 
 
 async def fetch_commodity_news_sources():
-    """Lấy tin từ nhiều nguồn hàng hoá"""
     all_articles = []
 
-    # Nguồn 1: Nasdaq Commodities
     articles1 = await fetch_from_source(
         "https://www.nasdaq.com/market-activity/commodities",
         "https://www.nasdaq.com"
@@ -461,7 +448,6 @@ async def fetch_commodity_news_sources():
     all_articles.extend(articles1)
     await asyncio.sleep(1)
 
-    # Nguồn 2: MarketWatch Commodities
     articles2 = await fetch_from_source(
         "https://www.marketwatch.com/investing/commodities",
         "https://www.marketwatch.com"
@@ -469,14 +455,12 @@ async def fetch_commodity_news_sources():
     all_articles.extend(articles2)
     await asyncio.sleep(1)
 
-    # Nguồn 3: Investing.com Commodities News
     articles3 = await fetch_from_source(
         "https://www.investing.com/commodities/",
         "https://www.investing.com"
     )
     all_articles.extend(articles3)
 
-    # Dedup theo title
     seen = set()
     unique = []
     for a in all_articles:
@@ -489,12 +473,27 @@ async def fetch_commodity_news_sources():
 
 
 async def fetch_reuters_commodities():
-    """Wrapper để tương thích với code cũ"""
     return await fetch_commodity_news_sources()
 
 
+def format_commodity_news(news):
+    emoji = news.get("emoji", "📰")
+    title_vi = news.get("title_vi", "")
+    analysis = news.get("analysis", "")
+    article = news.get("article", {})
+    link = article.get("link", "")
+
+    lines = [
+        f"{emoji} *{title_vi}*",
+        f"",
+        f"👉 {analysis}",
+    ]
+    if link:
+        lines.append(f"\n🔗 [Đọc thêm]({link})")
+    return "\n".join(lines)
+
+
 async def filter_and_analyze_news(articles):
-    """AI loc va phan tich tin quan trong - 1 API call duy nhat"""
     if not articles:
         return []
 
@@ -522,7 +521,7 @@ Neu khong co tin quan trong: NONE"""
         result = await asyncio.to_thread(call_gemini, prompt)
 
         if not result:
-            logger.warning("Gemini returned None, skipping")
+            logger.warning("Groq returned None, skipping")
             return []
 
         if "NONE" in result:
@@ -562,13 +561,11 @@ Neu khong co tin quan trong: NONE"""
 
 
 async def check_commodity_news(context=None):
-    """Kiểm tra và đăng tin mẩu hàng hoá"""
     logger.info("Checking commodity news...")
     articles = await fetch_reuters_commodities()
     if not articles:
         return
 
-    # Lọc bài chưa đăng
     new_articles = [a for a in articles if a["title"] not in posted_news]
     if not new_articles:
         return
@@ -600,25 +597,21 @@ async def check_commodity_news(context=None):
 
 async def main():
     logger.info("News Bot dang chay...")
-    
-    # Các counter để track lần check
+
     commodity_counter = 0
 
     while True:
         try:
             logger.info("--- Checking news sources ---")
-            
-            # ForexFactory: check mỗi vòng (10 phút)
+
             await check_forex_news()
             await asyncio.sleep(10)
 
-            # EIA + USDA: check mỗi vòng (có tự lọc ngày/giờ bên trong)
             await check_eia_news()
             await asyncio.sleep(10)
             await check_usda_news()
             await asyncio.sleep(10)
 
-            # Tin mẩu Reuters: check mỗi 3 vòng (30 phút) để tiết kiệm quota
             commodity_counter += 1
             if commodity_counter >= 3:
                 await check_commodity_news()
@@ -626,31 +619,30 @@ async def main():
                 await asyncio.sleep(10)
 
             logger.info("--- Done, sleeping 10 minutes ---")
-            await asyncio.sleep(600)  # 10 phút
-            
+            await asyncio.sleep(600)
+
         except Exception as e:
             logger.error(f"Main loop error: {e}")
             await asyncio.sleep(120)
 
 
 async def test_bot():
-    """Test toàn bộ luồng bot"""
-    import google.generativeai as genai
-    from telegram import Bot
-
     logger.info("=== RUNNING TEST ===")
     bot = Bot(token=BOT_TOKEN)
 
-    # Test 1: Gemini AI
-    logger.info("Test 1: Gemini AI...")
+    # Test 1: Groq AI
+    logger.info("Test 1: Groq AI...")
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        response = model.generate_content("Viết 1 câu ngắn về giá đậu tương bằng tiếng Việt.")
-        analysis = response.text.strip()
-        logger.info(f"Gemini OK: {analysis[:50]}...")
+        client = Groq(api_key=GEMINI_API_KEY)
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": "Viết 1 câu ngắn về giá đậu tương bằng tiếng Việt."}],
+            max_tokens=100
+        )
+        analysis = response.choices[0].message.content.strip()
+        logger.info(f"Groq OK: {analysis[:50]}...")
     except Exception as e:
-        logger.error(f"Gemini FAILED: {e}")
+        logger.error(f"Groq FAILED: {e}")
         return
 
     # Test 2: Gửi tin test lên channel
