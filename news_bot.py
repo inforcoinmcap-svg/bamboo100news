@@ -598,6 +598,24 @@ async def check_commodity_news(context=None):
 async def main():
     logger.info("News Bot dang chay...")
 
+    # ---- AUTO TEST KHI KHỞI ĐỘNG ----
+    logger.info("=== AUTO TEST ===")
+    try:
+        client = Groq(api_key=GEMINI_API_KEY)
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": "Viết 1 câu ngắn về giá vàng bằng tiếng Việt."}],
+            max_tokens=100
+        )
+        analysis = response.choices[0].message.content.strip()
+        logger.info(f"Groq OK: {analysis}")
+        bot = Bot(token=BOT_TOKEN)
+        await bot.send_message(chat_id=CHANNEL_ID, text=f"🤖 Bot online!\n\n👉 {analysis}")
+        logger.info("=== AUTO TEST PASSED ✅ ===")
+    except Exception as e:
+        logger.error(f"=== AUTO TEST FAILED: {e} ===")
+    # ---- HẾT TEST ----
+
     commodity_counter = 0
 
     while True:
