@@ -3,3 +3,8 @@ httpx
 beautifulsoup4
 google-generativeai
 pytz
+httpx
+beautifulsoup4
+python-telegram-bot
+google-generativeai
+groq
