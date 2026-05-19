@@ -488,8 +488,6 @@ def format_commodity_news(news):
         f"",
         f"👉 {analysis}",
     ]
-    if link:
-        lines.append(f"\n🔗 [Đọc thêm]({link})")
     return "\n".join(lines)
 
 
