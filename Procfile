@@ -1,1 +1,1 @@
-worker: python news_bot.py test
+worker: python news_bot.py
